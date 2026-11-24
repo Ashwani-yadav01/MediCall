@@ -1,276 +1,220 @@
-# MediCall — Voice AI Doctor Appointment Assistant
+# Voice AI Doctor Appointment Assistant
+### SDE Intern – Round 1 Assignment Submission
 
-A production-grade, full-stack Voice AI Doctor Appointment Assistant application built for real-time healthcare scheduling. Allows patients to converse naturally via browser voice or text with an AI assistant that identifies callers by phone number, checks live physician availability, books appointments with ACID double-booking protection, and handles cancellations with verbal verification.
-
-Supports **Mock Mode (Default, runs out-of-the-box with zero API keys required)** and **Live Mode (Pipecat + ElevenLabs STT/TTS + Google Gemini LLM)**.
+A real-time, production-grade Voice AI doctor appointment scheduling system. Callers converse naturally with an AI agent in the browser to check physician availability, book appointments, and cancel existing ones. The system identifies callers solely by the phone number they speak out loud, verbally confirms all scheduling decisions, prevents double bookings with database ACID transactions, and visualizes call activity and appointment records through a healthcare SaaS dashboard.
 
 ---
 
-## 1. Architecture Diagram
+## 1. Project Overview & Required Tech
+
+| Component | Technology | Description |
+| :--- | :--- | :--- |
+| **Voice Framework** | **Pipecat AI (Python 3.12)** | Real-time audio pipeline and tool function-calling orchestration |
+| **LLM Engine** | **Google Gemini (`gemini-3.5-flash-lite`)** | High-speed conversational reasoning and multi-turn function calling |
+| **Speech-to-Text (STT)** | **ElevenLabs (`scribe_v1`)** | Low-latency speech recognition and streaming transcription |
+| **Text-to-Speech (TTS)** | **ElevenLabs (`eleven_turbo_v2_5`)** | Natural neural speech synthesis (Voice ID: `JBFqnCBsd6RMkjVDRZzb`) |
+| **Voice Activity Detection** | **Silero VAD** | Real-time speech boundary detection for turn-taking |
+| **Backend API** | **FastAPI + WebSockets** | Asynchronous HTTP endpoints and bi-directional voice streaming |
+| **Database & ORM** | **SQLite + SQLAlchemy 2.0** | Persistent schema with ACID transactions & unique slot locks |
+| **Frontend Dashboard** | **React 19 + TypeScript + Vite** | Production-quality healthcare SaaS console with Tailwind CSS |
+
+> **LLM Selection Note**: Google Gemini (`gemini-3.5-flash-lite`) was chosen for this project because it provides sub-second latency, precise function/tool calling compatibility, and generous free tier quotas, ensuring cost-free evaluation and high reliability.
+
+---
+
+## 2. Voice Pipeline Description (In Plain Words)
+
+The voice pipeline runs a full duplex conversation loop:
+
+$$\text{Caller Audio} \longrightarrow \text{ElevenLabs STT} \longrightarrow \text{Gemini LLM (Function Calling)} \longrightarrow \text{ElevenLabs TTS} \longrightarrow \text{Caller Audio}$$
+
+Here is how each turn executes step by step:
+
+1. **Audio Capture & VAD**: The caller speaks into the browser. Voice activity detection detects speech pauses and streams the audio over a dedicated WebSocket connection (`/ws/call`).
+2. **Speech-to-Text (STT)**: ElevenLabs STT transcribes the caller's spoken words in real time.
+3. **Conversational LLM Reasoning**: The transcription is fed to **Google Gemini**. Gemini evaluates the caller's intent against registered function-calling tools:
+   - `check_doctor_availability`: Queries verified slots for a doctor, specialty, or date.
+   - `book_appointment`: Reserves a slot using the caller's verified phone number.
+   - `cancel_appointment`: Cancels a caller's booking after confirming phone number ownership.
+4. **Tool Execution & Database Commitment**: When Gemini invokes a tool, the backend executes the operation directly inside an isolated database transaction, enforcing ACID guarantees and verifying that the slot is not already taken.
+5. **Text-to-Speech (TTS)**: The LLM's verbal response is synthesized by ElevenLabs TTS and streamed back to the browser speaker.
+6. **Acoustic Echo Isolation**: While the assistant speaks, the microphone is automatically muted with an acoustic delay guard to prevent the AI from hearing itself through laptop speakers.
+7. **Real-Time Dashboard Sync**: Every scheduling action (booking, cancellation, tool execution) is broadcast via WebSockets to instantly update the appointment table, activity logs, and metric cards without requiring a page refresh.
+
+---
+
+## 3. Architecture Diagram
 
 ```mermaid
 flowchart TD
-    subgraph Browser ["Frontend (React + TypeScript + Vite)"]
-        UI["Healthcare SaaS Dashboard"]
-        CallConsole["Voice Call Console & Waveform"]
-        WebSpeech["Web Speech API (STT / TTS)"]
+    subgraph Frontend ["Frontend Dashboard (React + TypeScript + Vite)"]
+        UI["Healthcare SaaS Console"]
+        CallScreen["Phone-Style Call Interface"]
+        Waveform["Audio Waveform Visualizer"]
         WSClient["WebSocket Client (/ws/call)"]
     end
 
-    subgraph Backend ["Backend (FastAPI + Python 3.12)"]
-        WSEndpoint["Voice WebSocket Handler"]
+    subgraph Backend ["Backend Server (FastAPI + Python 3.12)"]
+        WSEndpoint["Voice WebSocket Controller"]
         REST["REST API (/api/doctors, /api/appointments)"]
-        EventManager["Connection Manager (Broadcast Engine)"]
+        ConnManager["Connection Manager (Broadcast Engine)"]
 
-        subgraph Pipeline ["Voice Pipeline (Dual-Mode)"]
-            MockAdapter["Mock Agent Adapter (Local / Deterministic)"]
-            PipecatEngine["Pipecat Audio Pipeline (Live)"]
-            VAD["Silero VAD / Voice Activity Detection"]
-            ElevenSTT["ElevenLabs STT"]
-            GeminiLLM["Google Gemini LLM"]
-            ElevenTTS["ElevenLabs TTS"]
+        subgraph Pipeline ["Pipecat Voice Pipeline"]
+            VAD["Silero VAD"]
+            STT["ElevenLabs STT (scribe_v1)"]
+            LLM["Google Gemini (gemini-3.5-flash-lite)"]
+            TTS["ElevenLabs TTS (eleven_turbo_v2_5)"]
         end
 
         subgraph Tools ["Function Calling Tools"]
-            Tool1["check_doctor_availability"]
-            Tool2["book_appointment"]
-            Tool3["cancel_appointment"]
+            T1["check_doctor_availability"]
+            T2["book_appointment"]
+            T3["cancel_appointment"]
         end
 
-        subgraph ServiceLayer ["Business & Service Layer"]
-            AptService["AppointmentService (ACID & Verification)"]
-            DocService["DoctorService"]
-        end
-
-        subgraph DataLayer ["Database (SQLite + SQLAlchemy ORM)"]
-            DoctorsTbl[("Doctors")]
-            SlotsTbl[("AvailabilitySlots")]
-            AppointmentsTbl[("Appointments (Unique slot_id lock)")]
+        subgraph DatabaseLayer ["Database (SQLite + SQLAlchemy ORM)"]
+            AptService["AppointmentService (ACID Transactions)"]
+            DB[("SQLite Database (Unique slot_id lock)")]
         end
     end
 
-    CallConsole <--> WSClient
+    CallScreen <--> WSClient
     WSClient <--> WSEndpoint
-    UI <--> REST
-    REST --> ServiceLayer
     WSEndpoint --> Pipeline
     Pipeline --> Tools
-    Tools --> ServiceLayer
-    ServiceLayer --> DataLayer
-    ServiceLayer --> EventManager
-    EventManager -.-> WSClient
+    Tools --> AptService
+    AptService --> DB
+    AptService --> ConnManager
+    ConnManager -. Broadcast events .-> WSClient
+    UI <--> REST
+    REST --> AptService
 ```
 
 ---
 
-## 2. Technology Stack
+## 4. Key Features Implemented
 
-- **Backend**: Python 3.12, FastAPI, Uvicorn, WebSockets, Pydantic v2, Pydantic-Settings
-- **Database & ORM**: SQLite, SQLAlchemy 2.0 (ACID transactions, SQLite PRAGMA foreign keys, unique constraint double-booking locks)
-- **Voice Pipeline**:
-  - Live Mode: Pipecat AI, ElevenLabs Speech-to-Text, ElevenLabs Text-to-Speech, Google Gemini LLM
-  - Mock Mode: Development Agent Adapter, Web Speech API integration, deterministic state machine
-- **Frontend**: React 19, TypeScript, Vite, Tailwind CSS, Lucide React, Framer Motion
-- **Testing**: Pytest, Pytest-Asyncio, HTTPX
+### Part A: Voice Pipeline & Business Logic
+- **Caller Identification by Spoken Phone Number**: Callers are identified strictly by the phone number they speak out loud. No passwords, logins, or OTPs.
+- **Verbal Number Confirmation**: The agent reads the recognized phone number back to the caller (e.g., *"I have your phone number as 907-651-8281. Can you please confirm if this number is correct?"*) before proceeding.
+- **Double-Booking Prevention**:
+  - Application layer: Validates `slot.status == 'AVAILABLE'` inside an atomic transaction.
+  - Database layer: `slot_id` has a strict `UNIQUE` constraint on the `appointments` table. Any concurrent double-booking attempt triggers an immediate database integrity rollback.
+- **Ownership Verification on Cancellation**: A caller can only cancel an appointment if their verified phone number matches the number used during booking.
+- **Automatic Call Termination**: 4.5 seconds after a booking is verbally confirmed and the reference code is read out, the agent politely concludes and disconnects the call.
 
----
-
-## 3. Project Structure
-
-```
-MediCall/
-├── backend/
-│   ├── app/
-│   │   ├── api/                # REST endpoints (doctors, availability, appointments, dashboard, voice)
-│   │   ├── core/               # Configuration and environment settings
-│   │   ├── database/           # SQLite session and seed data generator
-│   │   ├── models/             # SQLAlchemy ORM models (Doctor, AvailabilitySlot, Appointment)
-│   │   ├── repositories/       # Data access layers
-│   │   ├── schemas/            # Pydantic schemas and phone number masking
-│   │   ├── services/           # Business logic, ACID transactions, verification
-│   │   ├── tools/              # Function calling schemas and tool handlers
-│   │   ├── voice/              # Agent state, Mock adapter, and Pipecat live pipeline
-│   │   ├── websocket/          # WebSocket connection manager and voice call handler
-│   │   └── main.py             # FastAPI application entrypoint
-│   ├── tests/                  # 16 automated test suites (API, Service, E2E Scenarios)
-│   ├── .env.example            # Backend environment template
-│   ├── pytest.ini              # Pytest configuration
-│   └── requirements.txt        # Backend dependencies
-├── frontend/
-│   ├── src/
-│   │   ├── components/         # Reusable UI components (Sidebar, Navbar, WaveformVisualizer, ConfirmationCard)
-│   │   ├── hooks/              # Custom hooks (useVoiceCall)
-│   │   ├── pages/              # Overview, VoiceAssistant, Doctors, Appointments, Activity, Settings
-│   │   ├── services/           # API and WebSocket client services
-│   │   ├── types/              # TypeScript definitions
-│   │   ├── App.tsx             # Root dashboard controller
-│   │   └── main.tsx            # Vite root entry
-│   ├── .env.example            # Frontend environment template
-│   └── vite.config.ts          # Vite build and proxy configuration
-└── README.md
-```
+### Part B: Production Healthcare Dashboard
+- **Live AI Integration Status Panel**: Visibly monitors the live operational state of Pipecat, Gemini, and ElevenLabs with an active health probe button (`/api/health/integrations`).
+- **Phone-Style Voice Assistant Screen**:
+  - Start / End voice call controls.
+  - Live animated dual-tone audio waveform.
+  - Real-time conversation transcript with speaker badges.
+  - In-call booking confirmation card displaying reference code, doctor, date, and fee.
+  - Hardware microphone indicator (<span style="color:#e11d48">Mic Muted</span> during speech, <span style="color:#059669">Mic Active</span> when listening).
+- **Physician Directory**: Browse doctors by department (Cardiology, Neurology, Dermatology, Orthopedics, Pediatrics, General Medicine), view consultation fees, and inspect live available slots in an interactive modal.
+- **Appointments Management Ledger**: Real-time table with status filters (Booked, Cancelled), phone number privacy masking (`***-***-8281`), and secure phone-verified cancellation dialog.
+- **Patient Directory**: Summarizes unique caller phone identities, consultation counts, assigned doctors, and last visit dates.
+- **Activity & Telemetry Logs**: Audit trail showing tool execution latencies (ms), sanitized arguments, and SQLite ACID confirmation badges.
 
 ---
 
-## 4. Quick Start (Mock Mode — Zero External API Keys)
+## 5. How to Run the Project
 
-The application starts in **Mock Mode** by default. You can test availability checking, phone verification, appointment booking, and cancellations without any paid API keys.
+### Prerequisites
+- Python 3.11+
+- Node.js 18+ & npm
 
-### 1. Start the Backend
+---
+
+### Step 1: Backend Setup
+
 ```bash
 cd backend
 
-# Create & activate virtual environment
+# 1. Create and activate a Python virtual environment
 python -m venv venv
-.\venv\Scripts\activate   # Windows PowerShell
-# source venv/bin/activate # Linux / macOS
 
-# Install dependencies
+# Windows PowerShell:
+.\venv\Scripts\activate
+# macOS / Linux:
+# source venv/bin/activate
+
+# 2. Install Python dependencies
 pip install -r requirements.txt
 
-# Run server (automatically seeds database with 9 doctors & 100+ slots)
+# 3. Configure environment variables (No keys committed)
+# Copy the template to .env
+cp .env.example .env
+```
+
+#### Dual Mode Configuration in `backend/.env`:
+
+- **Mock Mode (Default — Zero API keys required)**:
+  Runs out-of-the-box offline using the deterministic agent adapter and browser speech synthesis.
+  ```env
+  VOICE_MODE=mock
+  ```
+
+- **Live Mode (Full Pipecat + Gemini + ElevenLabs pipeline)**:
+  ```env
+  VOICE_MODE=live
+  GEMINI_API_KEY=your_gemini_api_key_here
+  GEMINI_MODEL_ID=gemini-3.5-flash-lite
+  ELEVENLABS_API_KEY=your_elevenlabs_api_key_here
+  ELEVENLABS_VOICE_ID=JBFqnCBsd6RMkjVDRZzb
+  ELEVENLABS_MODEL_ID=eleven_turbo_v2_5
+  ```
+
+```bash
+# 4. Start the backend server
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
-Backend API will be running at `http://localhost:8000` (Docs: `http://localhost:8000/docs`).
+The backend will be running at `http://localhost:8000` (Swagger docs: `http://localhost:8000/docs`). On startup, it automatically creates the SQLite database and seeds **9 verified doctors** and **252 upcoming slots**.
 
-### 2. Start the Frontend
-In a separate terminal:
+---
+
+### Step 2: Frontend Setup
+
+In a new terminal:
+
 ```bash
 cd frontend
 
-# Install npm dependencies
+# 1. Install npm packages
 npm install
 
-# Start Vite dev server
+# 2. Start Vite development server
 npm run dev
 ```
-Open `http://localhost:5173` in your browser.
+
+Open your browser to `http://localhost:5173`.
 
 ---
 
-## 5. Live Mode Configuration
+## 6. Required Function Calling Tools
 
-To activate real-time ElevenLabs STT/TTS and Google Gemini LLM via Pipecat:
-
-1. Open `backend/.env`.
-2. Update the credentials:
-```env
-VOICE_MODE=live
-GEMINI_API_KEY=your_gemini_api_key_here
-GEMINI_MODEL_ID=gemini-3.5-flash
-ELEVENLABS_API_KEY=your_elevenlabs_api_key_here
-ELEVENLABS_VOICE_ID=JBFqnCBsd6RMkjVDRZzb
-ELEVENLABS_MODEL_ID=eleven_turbo_v2_5
-```
-3. Restart the backend. The dashboard status pill will immediately reflect **Live Mode Active**.
-4. You can verify live integration status anytime at:
-   - Lightweight status: `GET http://localhost:8000/api/health/integrations`
-   - Active probe: `GET http://localhost:8000/api/health/integrations?probe=true`
+| Tool Name | Parameters | Purpose |
+| :--- | :--- | :--- |
+| `check_doctor_availability` | `doctor_name` (str, optional)<br>`speciality` (str, optional)<br>`date` (str, optional) | Queries the database for open appointment slots. Requires either a doctor or specialty to prevent dumping irrelevant clinic schedules. |
+| `book_appointment` | `phone_number` (str)<br>`doctor_id` (int)<br>`slot_id` (int)<br>`patient_name` (str)<br>`confirmation_status` (bool) | Locks the slot, creates the appointment record, commits the transaction, and returns the reference code (`APT-XXXX`). Requires `confirmation_status=True`. |
+| `cancel_appointment` | `phone_number` (str)<br>`appointment_reference` (str)<br>`confirmation_status` (bool) | Verifies that the caller's phone matches the booking, sets status to `CANCELLED`, releases the slot back to `AVAILABLE`, and commits. |
 
 ---
 
-## 6. How the Pipecat Voice Pipeline Works
+## 7. Automated Test Suite
 
-1. **Browser Audio Input**: User speaks into the browser microphone.
-2. **Audio Transport**: Audio frames are streamed over WebSocket / WebRTC to the backend.
-3. **Voice Activity Detection (VAD)**: Silero VAD monitors speech boundaries and enables natural user interruption.
-4. **Speech-to-Text (STT)**: ElevenLabs STT streams high-accuracy speech transcription.
-5. **LLM & Function Calling**: Google Gemini receives conversational history and tool declarations. When a scheduling action is needed, Gemini yields tool calls (`check_doctor_availability`, `book_appointment`, or `cancel_appointment`).
-6. **Tool Execution**: Function handlers execute operations directly against `AppointmentService` inside database transactions.
-7. **Text-to-Speech (TTS)**: ElevenLabs TTS generates low-latency audio stream of the assistant's voice.
-8. **Audio Output**: Streamed back to the browser speaker while telemetry updates the live waveform and transcript.
+The backend includes 18 automated test suites verifying all API endpoints, database ACID constraints, double-booking prevention, and end-to-end multi-turn conversations.
 
----
-
-## 7. How Function Calling Tools Work
-
-The system defines 3 strict tools:
-
-### Tool 1: `check_doctor_availability`
-- **Inputs**: `doctor_name` (optional), `speciality` (optional), `date` (optional).
-- **Execution**: Queries `AvailabilitySlot` joined with `Doctor`. Returns only slots where `status == 'AVAILABLE'`. Never returns booked slots.
-
-### Tool 2: `book_appointment`
-- **Inputs**: `patient_name`, `phone_number`, `doctor_id`, `slot_id`, `confirmation_status`.
-- **Validation**: Requires `confirmation_status == True`. Validates slot exists and is available.
-- **ACID Transaction**: Atomically sets `slot.status = 'BOOKED'`, inserts `Appointment` with unique `slot_id` constraint, and commits. Returns reference (e.g. `APT-202611-XXXX`).
-
-### Tool 3: `cancel_appointment`
-- **Inputs**: `phone_number`, `appointment_reference` (optional), `confirmation_status`.
-- **Validation**: Rejects cancellation if the appointment belongs to a different phone number.
-- **ACID Transaction**: Sets `appointment.status = 'CANCELLED'`, re-opens `slot.status = 'AVAILABLE'`, preserving complete audit history.
-
----
-
-## 8. Database Design & ACID Protections
-
-### Entity Relationships
-- **Doctor (1) ──< AvailabilitySlot (N)**: Cascade deletion, indexes on speciality and name.
-- **Doctor (1) ──< Appointment (N)**: Audit trail.
-- **AvailabilitySlot (1) ── (1) Appointment**: Protected by `UniqueConstraint('slot_id')` on Appointment table.
-
-### Double-Booking Prevention
-1. **Application-level atomic transaction**: Validates `slot.status == 'AVAILABLE'` inside session transaction.
-2. **Database-level unique constraint**: `slot_id` column in `appointments` table has a `UNIQUE` constraint. Even under high-concurrency race conditions, SQLite enforces consistency and aborts concurrent writes with an `IntegrityError`.
-
----
-
-## 9. Automated Testing
-
-All 16 test suites pass:
 ```bash
 cd backend
-.\venv\Scripts\pytest.exe -v
+.\venv\Scripts\pytest tests -v
 ```
 
-### Coverage:
-- `test_doctor_listing_and_filtering`: Roster lookup and speciality filtering.
-- `test_availability_filtering`: Dynamic slot queries by doctor, speciality, and date.
-- `test_booking_valid_slot`: Validates booking transaction and slot status transition.
-- `test_rejecting_unavailable_slot`: Confirms booked slots cannot be re-booked.
-- `test_preventing_double_booking_database_constraint`: Validates SQLite unique constraint integrity.
-- `test_booking_confirmation_requirement`: Enforces verbal confirmation before booking.
-- `test_cancellation_by_phone_number`: Verifies slot release and appointment history preservation.
-- `test_rejecting_cancellation_for_different_phone_number`: Rejects unauthorized cancellation attempts.
-- `test_multiple_appointment_handling`: Asks caller to select appointment when multiple exist.
-- `test_scenario_a_successful_booking_flow`: Full 11-step end-to-end conversation booking.
-- `test_scenario_b_successful_cancellation_flow`: Full 10-step end-to-end conversation cancellation.
-- `test_api_endpoints`: Health, doctors, availability, stats, and voice config endpoints.
-
----
-
-## 10. Manual Testing Walkthrough
-
-### Scenario A: Booking an Appointment
-1. Navigate to **Voice Assistant** and click **Start Phone Call**.
-2. Agent greets you and asks for your phone number.
-3. Speak or type: `"My phone number is 555-123-4567"`.
-4. Agent reads back: `"I heard your phone number as 5551234567. Before we proceed, could you please confirm if this number is correct?"`
-5. Speak or type: `"Yes, that is correct."`
-6. Speak or type: `"I want to see Dr. Sarah Jenkins"` (or `"I need a cardiologist"`).
-7. Agent checks database and lists available slots (e.g. 09:00 AM, 10:00 AM).
-8. Speak or type: `"Book the 09:00 AM slot."`
-9. Agent repeats details: `"You are booking an appointment with Dr. Sarah Jenkins (Cardiology) on 2026-11-25 at 09:00 AM. Total consultation fee is $150. Do you confirm this booking?"`
-10. Speak or type: `"Yes, confirm the booking."`
-11. Booking Confirmation Card displays inside the call screen with reference code `APT-XXXXXXXX`.
-12. Navigate to **Appointments** or **Overview** to see the new booking highlighted in the table!
-
-### Scenario B: Cancelling an Appointment
-1. Start call on the Voice Assistant page.
-2. Provide and confirm your phone number: `"555-123-4567"`.
-3. Say: `"I want to cancel my appointment."`
-4. Agent locates your active booking: `"I found your appointment APT-XXXXXXXX with Dr. Sarah Jenkins. Are you sure you want to cancel this appointment?"`
-5. Say: `"Yes, please cancel it."`
-6. Cancellation Card appears, appointment status updates to `CANCELLED`, and the slot is released back to the schedule.
-
----
-
-## 11. Technical Interview Explanation (Cheat Sheet)
-
-If asked to explain this project during an SDE interview:
-
-> *"The system is an AI voice scheduling assistant designed around strict data integrity and privacy rules. The caller is identified solely by their spoken phone number, which must be read back and verbally confirmed before any scheduling operations can occur.*
->
-> *The architecture separates speech and conversational intelligence from core database transactions. The AI interacts with the database exclusively through function-calling tools (`check_doctor_availability`, `book_appointment`, and `cancel_appointment`). Double booking is prevented at both the application level through ACID transactions and at the database level using a unique constraint on the slot foreign key.*
->
-> *The system features a dual-mode engine: in Mock Mode, it runs completely offline with a deterministic agent adapter and browser Web Speech API, allowing full end-to-end testing without external API keys. In Live Mode, it connects to a Pipecat pipeline orchestrating ElevenLabs STT, Gemini LLM with function calling, and ElevenLabs TTS over low-latency WebSockets."*
+### Test Coverage Highlights:
+- `test_preventing_double_booking_database_constraint`: Confirms SQLite unique constraint prevents race-condition double bookings.
+- `test_booking_confirmation_requirement`: Verifies booking is rejected without explicit verbal confirmation.
+- `test_cancellation_by_phone_number`: Verifies slot release and ownership match.
+- `test_rejecting_cancellation_for_different_phone_number`: Verifies HIPAA-style phone isolation.
+- `test_scenario_a_successful_booking_flow`: Full multi-turn booking conversation.
+- `test_scenario_b_successful_cancellation_flow`: Full multi-turn cancellation conversation.
+- `test_integrations_health_endpoint_with_probe`: Live network connectivity probes for Gemini and ElevenLabs.
